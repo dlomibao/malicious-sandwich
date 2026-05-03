@@ -6,7 +6,10 @@ import { DiagnosticMatrix } from "./components/DiagnosticMatrix";
 import { rollMood } from "./data/moods";
 import { buildMarkIVPrompt, type SandwichLayer } from "./prompts/markiv";
 import { buildBureauPrompt } from "./prompts/bureau";
-import { callClaude } from "./api";
+import { callLLM } from "./api";
+import { getPlayerId } from "./lib/playerId";
+import { saveRun } from "./lib/storage";
+import { submitRun } from "./lib/stats";
 
 interface MarkIVResult {
   emoji: string;
@@ -73,7 +76,7 @@ export default function App() {
     const prompt = buildMarkIVPrompt(newInstruction, sandwich, instructions);
 
     try {
-      const result = await callClaude<MarkIVResult>({ prompt, role: "markiv" });
+      const result = await callLLM<MarkIVResult>({ prompt, role: "markiv" });
       setRobotState("speaking");
       setRobotSpeech(result.robotSpeech || "EXECUTED.");
 
@@ -117,9 +120,33 @@ export default function App() {
     const prompt = buildBureauPrompt(mood.key, plateDesc, instructions.join(" → "));
 
     try {
-      const result = await callClaude<BureauResult>({ prompt, role: "bureau" });
+      const result = await callLLM<BureauResult>({ prompt, role: "bureau" });
       setFinalReview({ ...result, mood });
       setRobotSpeech("SHIFT COMPLETE.");
+
+      const totalChaos = sandwich.reduce((acc, s) => acc + s.chaos, 0);
+      saveRun({
+        ts: Date.now(),
+        mood: mood.key,
+        moodLabel: mood.label,
+        stars: result.stars,
+        verdict: result.verdict,
+        review: result.review,
+        numDirectives: instructions.length,
+        numLayers: sandwich.length,
+        totalChaos,
+      });
+      submitRun({
+        player_id: getPlayerId(),
+        mood: mood.key,
+        stars: result.stars,
+        verdict: result.verdict,
+        num_directives: instructions.length,
+        num_layers: sandwich.length,
+        total_chaos: totalChaos,
+      }).catch((err: unknown) => {
+        console.warn("stats submit failed:", err);
+      });
     } catch {
       setError("EVALUATION FAILED.");
     } finally {

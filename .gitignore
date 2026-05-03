@@ -26,3 +26,9 @@ venv/
 
 # Cloudflare (legacy)
 .wrangler/
+
+# SQLite stats DB
+sandwich.db
+sandwich.db-journal
+sandwich.db-wal
+sandwich.db-shm

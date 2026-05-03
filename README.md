@@ -7,8 +7,10 @@ The prose is the product.
 ## Stack
 
 - **Frontend:** Vite + React + TypeScript + Tailwind CSS
-- **Backend:** Python + FastAPI (proxies the Anthropic Messages API so the key stays server-side)
-- **Model:** Claude Sonnet 4.5 (default), Haiku 4.5 selectable per request
+- **Backend:** Python + FastAPI — provider-agnostic LLM proxy + SQLite stats store
+- **Providers:** Anthropic (default), OpenAI, Google Gemini — pick per request, swap with `DEFAULT_PROVIDER`
+- **Model tiers:** `smart` (default) and `fast`, mapped per provider in `backend/providers/*`
+- **Stats:** anonymous per-device player ID + localStorage history + server-side SQLite for global aggregates
 
 ## Quick start
 
@@ -25,7 +27,8 @@ pip install -r backend/requirements.txt
 
 # 3) backend env
 cp backend/.env.example backend/.env
-# edit backend/.env, set ANTHROPIC_API_KEY=sk-ant-...
+# edit backend/.env: set DEFAULT_PROVIDER and at least one of
+#   ANTHROPIC_API_KEY / OPENAI_API_KEY / GOOGLE_API_KEY
 
 # 4) run both (Vite proxies /api → FastAPI on :8000)
 npm run dev:all
@@ -60,11 +63,16 @@ sandwich/
 │   ├── main.tsx               # React entry
 │   ├── App.tsx                # Game shell
 │   ├── index.css              # Tailwind + bureau aesthetic
-│   ├── api.ts                 # Calls /api/claude on the FastAPI backend
+│   ├── api.ts                 # callLLM → /api/llm
+│   ├── lib/
+│   │   ├── playerId.ts        # Anonymous per-device UUID
+│   │   ├── storage.ts         # localStorage run history
+│   │   └── stats.ts           # /api/stats/* fetchers
 │   ├── components/
 │   │   ├── Robot.tsx
 │   │   ├── ResultModal.tsx    # The screenshot target
 │   │   ├── StarRating.tsx
+│   │   ├── StatsPanel.tsx     # Embedded in ResultModal
 │   │   └── DiagnosticMatrix.tsx
 │   ├── prompts/
 │   │   ├── markiv.ts          # Assembler prompt
@@ -74,7 +82,15 @@ sandwich/
 │       ├── moods.ts           # Mood definitions, weights
 │       └── examples.ts        # Synthetic test sandwiches (F0–F5)
 ├── backend/
-│   ├── main.py                # FastAPI app: POST /api/claude, GET /api/health
+│   ├── main.py                # FastAPI app: /api/llm, /api/stats/*, /api/health
+│   ├── providers/             # Pluggable LLM providers (anthropic, openai, google)
+│   │   ├── base.py
+│   │   ├── anthropic_provider.py
+│   │   ├── openai_provider.py
+│   │   └── google_provider.py
+│   ├── stats.py               # /api/stats/run + /api/stats/summary
+│   ├── db.py                  # SQLite connection + schema
+│   ├── rate_limit.py          # Per-IP sliding-window limiter
 │   ├── requirements.txt
 │   ├── .env.example
 │   └── __init__.py

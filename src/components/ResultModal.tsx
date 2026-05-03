@@ -1,6 +1,7 @@
 import { RotateCcw } from "lucide-react";
 import type { Mood } from "../data/moods";
 import { StarRating, tierForStars } from "./StarRating";
+import { StatsPanel } from "./StatsPanel";
 
 export interface FinalReview {
   review: string;
@@ -83,6 +84,8 @@ export function ResultModal({ review, layerCount, onReset }: Props) {
               <div className="font-display text-lg">{layerCount.toString().padStart(2, "0")}</div>
             </div>
           </div>
+
+          <StatsPanel mood={review.mood.key} stars={review.stars} />
 
           <button
             onClick={onReset}

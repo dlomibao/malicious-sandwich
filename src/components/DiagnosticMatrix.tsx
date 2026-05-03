@@ -2,7 +2,7 @@ import { useState } from "react";
 import { MOODS, type MoodKey } from "../data/moods";
 import { TEST_SANDWICHES } from "../data/examples";
 import { buildBureauPrompt } from "../prompts/bureau";
-import { callClaude } from "../api";
+import { callLLM } from "../api";
 
 interface CellResult {
   loading?: boolean;
@@ -30,7 +30,7 @@ export function DiagnosticMatrix({ onClose }: { onClose: () => void }) {
     const plate = example.layers.map((l, i) => `Layer ${i + 1}: ${l}`).join("\n");
     const prompt = buildBureauPrompt(moodKey, plate, example.instructions);
     try {
-      const result = await callClaude<BureauResult>({ prompt, role: "diagnostic" });
+      const result = await callLLM<BureauResult>({ prompt, role: "diagnostic" });
       return { ok: true, ...result };
     } catch (err) {
       return { ok: false, error: String(err) };
