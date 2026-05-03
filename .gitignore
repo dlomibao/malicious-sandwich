@@ -1,9 +1,28 @@
+# Frontend
 node_modules/
 dist/
 .vite/
+*.log
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/
+
+# Env
 .env
 .env.local
 .env.*.local
-*.log
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Cloudflare (legacy)
 .wrangler/

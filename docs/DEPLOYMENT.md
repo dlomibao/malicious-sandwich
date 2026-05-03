@@ -1,189 +1,79 @@
 # Deployment
 
-## Architecture
+The app has two pieces:
 
-```
-┌──────────────────┐  HTTPS   ┌─────────────────────┐  HTTPS   ┌──────────────┐
-│  Cloudflare      │ ───────▶ │  Cloudflare Worker  │ ───────▶ │  Anthropic   │
-│  Pages (static)  │          │  (proxy + ratelimit)│          │  /v1/messages│
-│  sandwich.app    │          │  api.sandwich.app   │          └──────────────┘
-└──────────────────┘          └─────────────────────┘
-```
+1. **Static frontend** — Vite build, served from any static host (Cloudflare Pages, Vercel, Netlify, S3+CloudFront, nginx).
+2. **FastAPI backend** — single endpoint `/api/claude` that proxies the Anthropic Messages API. Deploy on Fly.io, Render, Railway, a VPS, or anything that runs a Python ASGI app.
 
-The frontend is a static SPA. All Claude calls go through a Cloudflare Worker that holds the API key and applies rate limiting. **Never** put the API key in the frontend bundle.
+The frontend never talks to `api.anthropic.com` directly — that would leak the key.
 
-## Step-by-step
-
-### 1. Frontend (Cloudflare Pages)
+## Build
 
 ```bash
-npm run build
-# Output: dist/
-
-npx wrangler pages deploy dist --project-name=sandwich
+npm install
+npm run build       # → dist/
 ```
 
-Set environment variable in the Pages dashboard:
+Serve `dist/` from any static host. For all non-`/api` paths, fall back to `index.html` (SPA routing isn't used today, but the convention is cheap).
 
-- `VITE_PROXY_URL` = `https://api.sandwich.yourdomain.com/api/claude`
+## Backend
 
-### 2. Worker (proxy)
+`backend/main.py` is a single-file FastAPI app. It needs:
 
-Create `worker/index.ts`:
+| Env var | Required | Default | Notes |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | yes | — | Server-side secret. |
+| `ALLOWED_ORIGINS` | recommended | `http://localhost:5173` | Comma-separated list. Must include your deployed frontend origin. |
+| `RATE_LIMIT_REQUESTS` | no | `30` | Per-IP requests per window. |
+| `RATE_LIMIT_WINDOW_S` | no | `60` | Window size in seconds. |
 
-```typescript
-export interface Env {
-  ANTHROPIC_API_KEY: string;
-  RATELIMIT: KVNamespace;
-}
-
-const ALLOWED_ORIGINS = ["https://sandwich.yourdomain.com"];
-const PER_IP_PER_MINUTE = 30;
-const PER_IP_PER_DAY = 200;
-
-export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
-    const origin = req.headers.get("Origin") ?? "";
-    if (!ALLOWED_ORIGINS.includes(origin)) {
-      return new Response("Forbidden", { status: 403 });
-    }
-
-    if (req.method === "OPTIONS") {
-      return cors(origin);
-    }
-    if (req.method !== "POST") {
-      return new Response("Method not allowed", { status: 405 });
-    }
-
-    const ip = req.headers.get("CF-Connecting-IP") ?? "unknown";
-    const minuteKey = `rl:m:${ip}:${Math.floor(Date.now() / 60000)}`;
-    const dayKey = `rl:d:${ip}:${new Date().toISOString().slice(0, 10)}`;
-
-    const [minuteCount, dayCount] = await Promise.all([
-      env.RATELIMIT.get(minuteKey).then((v) => parseInt(v ?? "0", 10)),
-      env.RATELIMIT.get(dayKey).then((v) => parseInt(v ?? "0", 10)),
-    ]);
-
-    if (minuteCount >= PER_IP_PER_MINUTE || dayCount >= PER_IP_PER_DAY) {
-      return new Response(JSON.stringify({ error: "Rate limited" }), {
-        status: 429,
-        headers: { ...corsHeaders(origin), "Content-Type": "application/json" },
-      });
-    }
-
-    const { prompt, model } = await req.json<{ prompt: string; model?: string }>();
-    const claudeModel = model === "haiku" ? "claude-haiku-4-5-20251001" : "claude-sonnet-4-6";
-
-    const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": env.ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: claudeModel,
-        max_tokens: 1000,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-
-    // Increment counters in background (don't block response)
-    await Promise.all([
-      env.RATELIMIT.put(minuteKey, String(minuteCount + 1), { expirationTtl: 90 }),
-      env.RATELIMIT.put(dayKey, String(dayCount + 1), { expirationTtl: 90000 }),
-    ]);
-
-    const body = await upstream.text();
-    return new Response(body, {
-      status: upstream.status,
-      headers: {
-        ...corsHeaders(origin),
-        "Content-Type": "application/json",
-      },
-    });
-  },
-};
-
-function corsHeaders(origin: string) {
-  return {
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Max-Age": "86400",
-  };
-}
-
-function cors(origin: string) {
-  return new Response(null, { status: 204, headers: corsHeaders(origin) });
-}
-```
-
-Create `worker/wrangler.toml`:
-
-```toml
-name = "sandwich-proxy"
-main = "index.ts"
-compatibility_date = "2026-04-01"
-
-routes = [
-  { pattern = "api.sandwich.yourdomain.com/api/claude", zone_name = "yourdomain.com" }
-]
-
-[[kv_namespaces]]
-binding = "RATELIMIT"
-id = "<your-kv-namespace-id>"
-```
-
-Deploy:
+Run with uvicorn or any ASGI server:
 
 ```bash
-cd worker
-npx wrangler kv namespace create RATELIMIT
-# Copy the ID into wrangler.toml
-
-npx wrangler secret put ANTHROPIC_API_KEY
-# Paste your key when prompted
-
-npx wrangler deploy
+uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-### 3. DNS
+For production, run behind nginx/Caddy with TLS, or use a managed platform.
 
-In Cloudflare DNS for your domain:
-
-- `sandwich` → Pages project (orange cloud)
-- `api.sandwich` → Worker route (orange cloud)
-
-### 4. Verify
+### Fly.io example
 
 ```bash
-curl -X POST https://api.sandwich.yourdomain.com/api/claude \
-  -H "Origin: https://sandwich.yourdomain.com" \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "Say hi in JSON: {\"hi\": \"...\"}"}'
+fly launch --no-deploy
+fly secrets set ANTHROPIC_API_KEY=sk-ant-... ALLOWED_ORIGINS=https://your.domain
+fly deploy
 ```
 
-Should return `{"content":[{"type":"text","text":"{\"hi\":\"there\"}"}],...}`.
+A minimal `Dockerfile`:
+
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY backend ./backend
+EXPOSE 8000
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+### Render / Railway
+
+Both work the same way: Python service, build command `pip install -r backend/requirements.txt`, start command `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`, set the env vars above.
+
+## Wiring frontend → backend
+
+In dev, Vite proxies `/api/*` to `http://127.0.0.1:8000` (see `vite.config.ts`).
+
+In prod, two options:
+
+1. **Same origin** (simplest, no CORS): serve the static frontend and the FastAPI app behind one reverse proxy, with `/api/*` routed to FastAPI and everything else to the static bundle.
+2. **Separate origins**: build the frontend with `VITE_PROXY_URL=https://api.your.domain/api/claude` (read by `src/api.ts`) and set `ALLOWED_ORIGINS` on the backend to the frontend's origin.
 
 ## Cost containment
 
-- **Per-IP per-minute cap**: 30 (one full game run is ~10 calls; this allows three rapid runs per minute)
-- **Per-IP per-day cap**: 200 (caps a single bad actor at ~$4/day on Sonnet, ~$1.80/day on Haiku-mix)
-- **Account-level monthly budget alarm**: set in Anthropic console at $100. When approached, the worker should start returning 503 and a friendly "MARK IV is overwhelmed today" message.
+- Per-IP rate limit (default 30 req/min) blocks one user from burning the budget in a few seconds. One full game is ~10 calls.
+- Add a per-IP daily cap (or a billing cap on the Anthropic dashboard) before going viral.
+- See `docs/COSTS.md` for the per-run model.
 
-## Diagnostic mode in production
+## Health check
 
-The F5 RUN ALL button fires 42 calls in quick succession. **Gate it behind a query param** so users can't accidentally trigger it:
-
-```typescript
-const debugEnabled = new URLSearchParams(location.search).has("debug");
-```
-
-Only show the F5 listener when `debugEnabled` is true. Document the URL: `https://sandwich.yourdomain.com/?debug=1`.
-
-## Observability
-
-- Cloudflare Worker logs: free, real-time tail with `wrangler tail`
-- Add Plausible or Cloudflare Web Analytics for traffic (no cookies, no banner needed)
-- Consider logging anonymized run outcomes to a worker log for prompt iteration data: which moods rolled, what star ratings resulted, what mood × star pairs produced "share" clicks. Don't log the user's directives — those might be PII or NSFW.
+`GET /api/health` returns `{ ok, anthropic_configured, default_model }`. Wire it to your platform's health check so deploys fail loudly when `ANTHROPIC_API_KEY` is missing.
